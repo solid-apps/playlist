@@ -1,4 +1,4 @@
-# Songstr
+# Playlist
 
 > YouTube playlist player. Load an M3U from any URL — including your Solid pod.
 
