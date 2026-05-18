@@ -935,57 +935,28 @@ https://www.youtube.com/watch?v=TDobuoZVPfQ
     window.secp256k1 = secp256k1
   </script>
 
-  <!-- NIP-98 Auth Shim -->
-  <script>
-    // nosdav-shim: Adds Nostr NIP-98 auth headers to fetch requests
-    const originalFetch = window.fetch
-    const authHosts = ['melvin.me', 'localhost', 'nosdav.net']
-
-    window.fetch = async function (url, options) {
-      const newOptions = { ...options }
-      const urlObj = new URL(url, window.location.origin)
-      const needsAuth = authHosts.some(h => urlObj.hostname.includes(h))
-      const method = (newOptions.method || 'GET').toUpperCase()
-
-      if (needsAuth && ['PUT', 'POST', 'DELETE', 'PATCH'].includes(method)) {
-        const event = {
-          kind: 27235,
-          created_at: Math.floor(Date.now() / 1000),
-          tags: [['u', url.toString()], ['method', method]],
-          content: ''
-        }
-
-        let auth
-        if (!localStorage.getItem('nostr:privkey') && window.nostr) {
-          const signedEvent = await window.nostr.signEvent(event)
-          auth = `Nostr ${btoa(JSON.stringify(signedEvent))}`
-        } else {
-          const privkey = localStorage.getItem('nostr:privkey')
-          if (privkey && window.secp256k1) {
-            const pubkey = secp256k1.utils.bytesToHex(secp256k1.schnorr.getPublicKey(privkey))
-            event.pubkey = pubkey
-            const eventString = JSON.stringify([0, pubkey, event.created_at, event.kind, event.tags, event.content])
-            const eventBytes = new TextEncoder().encode(eventString)
-            const eventHash = await secp256k1.utils.sha256(eventBytes)
-            const sig = secp256k1.utils.bytesToHex(await secp256k1.schnorr.sign(eventHash, privkey))
-            const signedEvent = { ...event, sig, id: secp256k1.utils.bytesToHex(eventHash) }
-            auth = `Nostr ${btoa(JSON.stringify(signedEvent))}`
-          }
-        }
-
-        if (auth) {
-          newOptions.headers = { ...newOptions.headers, authorization: auth }
-        }
-      }
-
-      return originalFetch.call(this, url, newOptions)
-    }
-  </script>
+  <!-- xlogin (universal Solid + Nostr auth widget).
+       Replaces the legacy NIP-98 fetch shim that lived here — that
+       shim was Songstr's half-finished auth attempt. xlogin owns auth
+       now via window.xlogin.authFetch, which the rest of the script
+       uses for any PUT against the pod. -->
+  <script src="https://unpkg.com/xlogin"></script>
 
   <!-- YouTube IFrame API -->
   <script src="https://www.youtube.com/iframe_api"></script>
 
   <script>
+    // === Auth (xlogin universal Solid + Nostr fetch) ===
+    // When the user is signed in via xlogin, route writes through
+    // window.xlogin.authFetch so they're DPoP/Bearer-signed against the
+    // pod. Falls back to plain fetch when not signed in (reads still
+    // work against public resources).
+    function authFetch(url, opts) {
+      return (window.xlogin && window.xlogin.authFetch)
+        ? window.xlogin.authFetch(url, opts)
+        : fetch(url, opts);
+    }
+
     // === State ===
     const state = {
       tracks: [],
@@ -1170,6 +1141,12 @@ https://www.youtube.com/watch?v=TDobuoZVPfQ
         currentTimeEl.textContent = formatTime(current)
         totalTimeEl.textContent = formatTime(duration)
       }
+
+      // Persist position to the Solid state doc periodically (every ~40
+      // intervals of 250ms ≈ 10s). Skips when we're applying an inbound
+      // update or when nothing's actually changed (dedupe in pushPlaylistState).
+      plState.everyN = (plState.everyN + 1) % 40
+      if (plState.everyN === 0 && state.isPlaying) pushPlaylistState()
     }
 
     // === Initialize ===
@@ -1249,7 +1226,7 @@ https://www.youtube.com/watch?v=TDobuoZVPfQ
       `
 
       try {
-        const response = await fetch(url)
+        const response = await authFetch(url)
         if (!response.ok) throw new Error('Failed to fetch playlist')
 
         const text = await response.text()
@@ -1274,6 +1251,11 @@ https://www.youtube.com/watch?v=TDobuoZVPfQ
 
         renderPlaylist()
         enableControls()
+
+        // Per-playlist Solid state doc: sibling <m3uUrl>.state.jsonld
+        // remembers {currentTrack, currentTime} for resume + cross-device
+        // sync. Initialize the state subscription for this playlist.
+        initPlaylistState(url)
 
         // Save URL
         localStorage.setItem('songstr-state', JSON.stringify({
@@ -1399,7 +1381,7 @@ https://www.youtube.com/watch?v=TDobuoZVPfQ
       autoSaveTimeout = setTimeout(async () => {
         try {
           const m3u = generateM3U()
-          const response = await fetch(playlistSourceUrl, {
+          const response = await authFetch(playlistSourceUrl, {
             method: 'PUT',
             headers: { 'Content-Type': 'audio/x-mpegurl' },
             body: m3u,
@@ -1478,6 +1460,203 @@ https://www.youtube.com/watch?v=TDobuoZVPfQ
 
       renderPlaylist()
       saveState()
+      pushPlaylistState()
+    }
+
+    // === Per-playlist Solid state doc (resume + cross-device sync) ===
+    // For each playlist loaded from a URL we maintain a sibling doc at
+    // `<m3uUrl>.state.jsonld` storing the active track + position.
+    // - Read on load → resume where you left off
+    // - Write on track-change and every ~10s of playback → keep in sync
+    // - Subscribe via JSS's solid-0.1 WebSocket → reflect changes from
+    //   any other device viewing the same playlist
+    // Public read+write ACL on the state doc keeps things simple for the
+    // PoC; matches the pattern used in solid-apps/pdf.
+
+    let plState = {
+      url: null,        // <m3uUrl>.state.jsonld
+      aclUrl: null,
+      ws: null,
+      backoff: 500,
+      pushTimer: null,
+      lastPushed: null,
+      applying: false,  // suppress echo when applying an inbound update
+      everyN: 0
+    }
+
+    function initPlaylistState(m3uUrl) {
+      teardownPlaylistState()
+      plState.url = m3uUrl + '.state.jsonld'
+      plState.aclUrl = plState.url + '.acl'
+      // Try to resume from the doc. Best-effort; if the doc/ACL don't
+      // exist yet we'll seed on the first pushPlaylistState.
+      resumePlaylistState().catch(() => {})
+      subscribePlaylistState().catch(() => {})
+    }
+
+    function teardownPlaylistState() {
+      if (plState.ws) { try { plState.ws.close() } catch {} }
+      plState = { url: null, aclUrl: null, ws: null, backoff: 500,
+                  pushTimer: null, lastPushed: null, applying: false, everyN: 0 }
+    }
+
+    async function resumePlaylistState() {
+      if (!plState.url) return
+      try {
+        const r = await authFetch(plState.url, { cache: 'no-store' })
+        if (!r.ok) return
+        const s = await r.json()
+        const idx = s['urn:track']
+        const t = s['urn:time']
+        if (typeof idx === 'number' && idx >= 0 && idx < state.tracks.length) {
+          plState.applying = true
+          // Wait for the player; it may not be ready right after load
+          const apply = () => {
+            if (!state.playerReady) { setTimeout(apply, 200); return }
+            selectTrackInternalNoPush(idx, false)
+            if (typeof t === 'number' && t > 0) {
+              try { state.player.seekTo(t, true) } catch {}
+            }
+            plState.applying = false
+          }
+          apply()
+        }
+      } catch {}
+    }
+
+    function selectTrackInternalNoPush(index, autoPlay) {
+      // Same as selectTrack but skip pushPlaylistState (used when we're
+      // applying a remote update — don't echo back).
+      const wasApplying = plState.applying
+      plState.applying = true
+      try {
+        if (index < 0 || index >= state.tracks.length) return
+        if (!state.playerReady) return
+        state.currentIndex = index
+        const track = state.tracks[index]
+        nowTitle.textContent = track.title
+        nowArtist.textContent = track.artist
+        artworkGlow.style.backgroundImage = `url(${track.thumbnail})`
+        if (autoPlay) state.player.loadVideoById(track.videoId)
+        else state.player.cueVideoById(track.videoId)
+        renderPlaylist()
+      } finally { plState.applying = wasApplying }
+    }
+
+    function pushPlaylistState() {
+      if (!plState.url || plState.applying) return
+      clearTimeout(plState.pushTimer)
+      plState.pushTimer = setTimeout(async () => {
+        const idx = state.currentIndex
+        const t = state.player && state.playerReady
+          ? Math.floor(state.player.getCurrentTime?.() || 0) : 0
+        if (idx < 0) return
+        const key = idx + '#' + t
+        if (key === plState.lastPushed) return
+        plState.lastPushed = key
+        await ensurePlaylistStateDoc()
+        try {
+          await authFetch(plState.url, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/ld+json' },
+            body: JSON.stringify({
+              '@context': { 'urn': 'urn:solid-apps:playlist:' },
+              '@id': '#state',
+              'urn:track': idx,
+              'urn:time': t,
+              'urn:modified': new Date().toISOString()
+            })
+          })
+        } catch {}
+      }, 200)
+    }
+
+    async function ensurePlaylistStateDoc() {
+      if (!plState.url) return
+      let docOk = false, aclOk = false
+      try { docOk = (await authFetch(plState.url, { method: 'HEAD' })).ok } catch {}
+      if (!docOk) {
+        try {
+          const r = await authFetch(plState.url, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/ld+json' },
+            body: JSON.stringify({
+              '@context': { 'urn': 'urn:solid-apps:playlist:' },
+              '@id': '#state',
+              'urn:track': -1,
+              'urn:time': 0,
+              'urn:modified': new Date().toISOString()
+            })
+          })
+          docOk = r.ok
+        } catch {}
+      }
+      try { aclOk = (await authFetch(plState.aclUrl, { method: 'HEAD' })).ok } catch {}
+      if (!aclOk) {
+        const stateFileName = plState.url.split('/').pop()
+        try {
+          await authFetch(plState.aclUrl, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/ld+json' },
+            body: JSON.stringify({
+              '@context': { 'acl': 'http://www.w3.org/ns/auth/acl#',
+                            'foaf': 'http://xmlns.com/foaf/0.1/' },
+              '@graph': [
+                { '@id': '#owner', '@type': 'acl:Authorization',
+                  'acl:agent': { '@id': '/profile/card.jsonld#me' },
+                  'acl:accessTo': { '@id': stateFileName },
+                  'acl:mode': [{'@id':'acl:Read'},{'@id':'acl:Write'},{'@id':'acl:Control'}] },
+                { '@id': '#public', '@type': 'acl:Authorization',
+                  'acl:agentClass': { '@id': 'foaf:Agent' },
+                  'acl:accessTo': { '@id': stateFileName },
+                  'acl:mode': [{'@id':'acl:Read'},{'@id':'acl:Write'}] }
+              ]
+            })
+          })
+        } catch {}
+      }
+    }
+
+    async function subscribePlaylistState() {
+      if (!plState.url) return
+      let r
+      try { r = await fetch(plState.url) } catch { return }
+      const wsUrl = r.headers.get('updates-via')
+      if (!wsUrl) return
+      const connect = () => {
+        const ws = new WebSocket(wsUrl)
+        plState.ws = ws
+        ws.onopen = () => { plState.backoff = 500; ws.send('sub ' + plState.url) }
+        ws.onmessage = async (e) => {
+          if (typeof e.data !== 'string' || !e.data.startsWith('pub ')) return
+          try {
+            const sr = await fetch(plState.url, { cache: 'no-store' })
+            if (!sr.ok) return
+            const s = await sr.json()
+            const idx = s['urn:track']
+            const t = s['urn:time']
+            // Skip if it's our own write (dedupe by key)
+            const key = idx + '#' + (typeof t === 'number' ? t : 0)
+            if (key === plState.lastPushed) return
+            if (typeof idx === 'number' && idx !== state.currentIndex) {
+              plState.applying = true
+              selectTrackInternalNoPush(idx, true)
+              if (typeof t === 'number' && t > 0) {
+                try { state.player.seekTo(t, true) } catch {}
+              }
+              setTimeout(() => { plState.applying = false }, 250)
+            }
+          } catch {}
+        }
+        ws.onclose = () => {
+          if (plState.ws === ws) {
+            plState.ws = null
+            setTimeout(connect, plState.backoff = Math.min(plState.backoff * 2, 10000))
+          }
+        }
+        ws.onerror = () => ws.close()
+      }
+      connect()
     }
 
     // === Playback Controls ===
@@ -1767,7 +1946,7 @@ https://www.youtube.com/watch?v=TDobuoZVPfQ
         console.log('Has extension:', !!window.nostr)
         console.log('Body length:', m3u.length)
 
-        const response = await fetch(url, {
+        const response = await authFetch(url, {
           method: 'PUT',
           headers: { 'Content-Type': 'audio/x-mpegurl' },
           body: m3u,
