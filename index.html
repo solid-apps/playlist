@@ -1,13 +1,13 @@
 <!DOCTYPE html>
 <!--
-  Songstr — YouTube playlist player with modern aesthetics
+  Playlist — YouTube playlist player with modern aesthetics
   Copyright (c) 2026 Melvin Carvalho.
   Licensed under AGPL-3.0-only — see LICENSE for full terms.
 -->
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>Songstr</title>
+  <title>Playlist</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="author" content="Melvin Carvalho">
   <meta name="description" content="A beautiful YouTube playlist player">
@@ -16,16 +16,20 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 
   <!-- Open Graph -->
-  <meta property="og:title" content="Songstr">
-  <meta property="og:description" content="A beautiful YouTube playlist player">
+  <meta property="og:title" content="Playlist">
+  <meta property="og:description" content="YouTube playlists. Saved to your Solid pod.">
   <meta property="og:type" content="website">
-  <meta property="og:image" content="https://melvin.me/images/songstr-og.svg">
+  <meta property="og:url" content="https://solid-apps.github.io/playlist/">
+  <meta property="og:image" content="https://solid-apps.github.io/playlist/og-image.svg">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:site_name" content="solid-apps">
 
   <!-- Twitter Card -->
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="Songstr">
-  <meta name="twitter:description" content="A beautiful YouTube playlist player">
-  <meta name="twitter:image" content="https://melvin.me/images/songstr-og.svg">
+  <meta name="twitter:title" content="Playlist">
+  <meta name="twitter:description" content="YouTube playlists. Saved to your Solid pod.">
+  <meta name="twitter:image" content="https://solid-apps.github.io/playlist/og-image.svg">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎵</text></svg>">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -752,7 +756,7 @@
       </div>
 
       <div class="track-info">
-        <h1 class="track-title" id="nowTitle">Songstr Collection</h1>
+        <h1 class="track-title" id="nowTitle">Playlist Collection</h1>
         <p class="track-artist" id="nowArtist">Select a track to play</p>
       </div>
 
@@ -796,7 +800,7 @@
     <section class="playlist-section" aria-label="Playlist">
       <header class="playlist-header">
         <div>
-          <h2 class="playlist-title" id="playlistTitle">Songstr<span class="playlist-modified" id="modifiedIndicator" style="display:none">modified</span></h2>
+          <h2 class="playlist-title" id="playlistTitle">Playlist<span class="playlist-modified" id="modifiedIndicator" style="display:none">modified</span></h2>
           <div class="playlist-meta" id="playlistMeta">YouTube Playlist Player</div>
         </div>
         <div class="header-buttons">
@@ -835,7 +839,7 @@
   <!-- Embedded Default Playlist (M3U format) -->
   <script type="text/plain" id="default-playlist">
 #EXTM3U
-#PLAYLIST:Songstr Collection
+#PLAYLIST:Playlist Collection
 #EXTSOURCE:https://www.youtube.com/playlist?list=PLlEMYzclVuGRFehjNyx6Y2vjrvKO0SYTz
 #EXTINF:-1,Koven - Another Home (Official Video)
 https://www.youtube.com/watch?v=MQDvtmwuE-w
@@ -933,7 +937,7 @@ https://www.youtube.com/watch?v=TDobuoZVPfQ
 
   <!-- xlogin (universal Solid + Nostr auth widget).
        Replaces the legacy NIP-98 fetch shim that lived here — that
-       shim was Songstr's half-finished auth attempt. xlogin owns auth
+       shim was Playlist's half-finished auth attempt. xlogin owns auth
        now via window.xlogin.authFetch, which the rest of the script
        uses for any PUT against the pod. -->
   <script src="https://unpkg.com/xlogin"></script>
@@ -1024,7 +1028,7 @@ https://www.youtube.com/watch?v=TDobuoZVPfQ
       state.player.setVolume(state.volume)
 
       // Load saved state
-      const saved = localStorage.getItem('songstr-state')
+      const saved = localStorage.getItem('playlist-state')
       if (saved) {
         const s = JSON.parse(saved)
         state.volume = s.volume ?? 75
@@ -1057,7 +1061,7 @@ https://www.youtube.com/watch?v=TDobuoZVPfQ
       state.tracks = parseM3U(m3uText)
 
       if (state.tracks.length > 0) {
-        playlistTitle.textContent = 'Songstr Collection'
+        playlistTitle.textContent = 'Playlist Collection'
         renderPlaylist()
         enableControls()
         selectTrack(0, false)
@@ -1254,8 +1258,8 @@ https://www.youtube.com/watch?v=TDobuoZVPfQ
         initPlaylistState(url)
 
         // Save URL
-        localStorage.setItem('songstr-state', JSON.stringify({
-          ...JSON.parse(localStorage.getItem('songstr-state') || '{}'),
+        localStorage.setItem('playlist-state', JSON.stringify({
+          ...JSON.parse(localStorage.getItem('playlist-state') || '{}'),
           lastPlaylistUrl: url
         }))
 
@@ -1836,7 +1840,7 @@ https://www.youtube.com/watch?v=TDobuoZVPfQ
     }
 
     function saveState() {
-      localStorage.setItem('songstr-state', JSON.stringify({
+      localStorage.setItem('playlist-state', JSON.stringify({
         volume: state.volume,
         shuffle: state.shuffle,
         repeat: state.repeat,
