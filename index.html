@@ -802,7 +802,9 @@
         <div class="header-buttons">
           <button class="save-btn" id="addTrackBtn" title="Add track">+</button>
           <button class="save-btn secondary" id="saveAsBtn">Save As</button>
-          <button class="login-btn" id="loginBtn">Login</button>
+          <!-- Legacy in-header Login removed in favor of xlogin's
+               universal widget (bottom-right). Auth state is reflected
+               by the widget itself; we don't need a duplicate. -->
         </div>
       </header>
 
@@ -927,12 +929,6 @@ https://www.youtube.com/watch?v=kAt6H_JkVxQ
 https://www.youtube.com/watch?v=fyaI4-5849w
 #EXTINF:-1,Robin Schulz x CYRIL - World Gone Wild (feat. Sam Martin)
 https://www.youtube.com/watch?v=TDobuoZVPfQ
-  </script>
-
-  <!-- secp256k1 for NIP-98 signing -->
-  <script type="module">
-    import * as secp256k1 from 'https://cdn.jsdelivr.net/npm/@noble/secp256k1@1.7.1/+esm'
-    window.secp256k1 = secp256k1
   </script>
 
   <!-- xlogin (universal Solid + Nostr auth widget).
@@ -1938,14 +1934,6 @@ https://www.youtube.com/watch?v=TDobuoZVPfQ
 
       try {
         const m3u = generateM3U()
-        console.log('=== PUT Request ===')
-        console.log('URL:', url)
-        console.log('Logged in:', localStorage.getItem('loggedIn'))
-        console.log('Pubkey:', localStorage.getItem('pubkey'))
-        console.log('Has privkey:', !!localStorage.getItem('nostr:privkey'))
-        console.log('Has extension:', !!window.nostr)
-        console.log('Body length:', m3u.length)
-
         const response = await authFetch(url, {
           method: 'PUT',
           headers: { 'Content-Type': 'audio/x-mpegurl' },
@@ -1953,11 +1941,7 @@ https://www.youtube.com/watch?v=TDobuoZVPfQ
           credentials: 'include'
         })
 
-        console.log('=== PUT Response ===')
-        console.log('Status:', response.status, response.statusText)
-        console.log('Headers:', [...response.headers.entries()])
         const responseText = await response.text()
-        console.log('Body:', responseText)
 
         if (response.ok) {
           playlistSourceUrl = url
@@ -2037,78 +2021,6 @@ https://www.youtube.com/watch?v=TDobuoZVPfQ
     addModal.addEventListener('click', (e) => { if (e.target === addModal) hideAddModal() })
     addUrl.addEventListener('keydown', (e) => { if (e.key === 'Enter') addName.focus() })
     addName.addEventListener('keydown', (e) => { if (e.key === 'Enter') confirmAddTrack() })
-
-    // === Nostr Login ===
-    const loginBtn = $('loginBtn')
-
-    function updateLoginUI() {
-      const pubkey = localStorage.getItem('pubkey')
-      const loggedIn = localStorage.getItem('loggedIn') === 'true'
-      if (loggedIn && pubkey) {
-        loginBtn.textContent = pubkey.substring(0, 8) + '...'
-        loginBtn.classList.add('logged-in')
-        loginBtn.title = 'Click to logout'
-      } else {
-        loginBtn.textContent = 'Login'
-        loginBtn.classList.remove('logged-in')
-        loginBtn.title = 'Login with Nostr'
-      }
-    }
-
-    async function handleLogin() {
-      const loggedIn = localStorage.getItem('loggedIn') === 'true'
-
-      if (loggedIn) {
-        // Logout
-        localStorage.removeItem('loggedIn')
-        localStorage.removeItem('pubkey')
-        localStorage.removeItem('nostr:privkey')
-        updateLoginUI()
-        showToast('Logged out')
-        return
-      }
-
-      // Try extension first
-      if (window.nostr) {
-        try {
-          const pubkey = await window.nostr.getPublicKey()
-          if (pubkey && /^[0-9a-fA-F]{64}$/.test(pubkey)) {
-            localStorage.setItem('loggedIn', 'true')
-            localStorage.setItem('pubkey', pubkey)
-            updateLoginUI()
-            showToast('Logged in!')
-            return
-          }
-        } catch (e) {
-          console.log('Extension login failed:', e)
-        }
-      }
-
-      // Fall back to private key prompt
-      const privkey = prompt('Enter your 64-character hex private key:')
-      if (privkey && privkey.length === 64 && /^[0-9a-fA-F]+$/.test(privkey)) {
-        try {
-          // Wait for secp256k1 to load
-          if (!window.secp256k1) {
-            showToast('Crypto library loading, try again...', true)
-            return
-          }
-          const pubkey = secp256k1.utils.bytesToHex(secp256k1.schnorr.getPublicKey(privkey))
-          localStorage.setItem('loggedIn', 'true')
-          localStorage.setItem('pubkey', pubkey)
-          localStorage.setItem('nostr:privkey', privkey)
-          updateLoginUI()
-          showToast('Logged in!')
-        } catch (e) {
-          showToast('Invalid private key', true)
-        }
-      } else if (privkey) {
-        showToast('Invalid key format (need 64 hex chars)', true)
-      }
-    }
-
-    loginBtn.addEventListener('click', handleLogin)
-    updateLoginUI()
 
     // === Initialize ===
     init()
